@@ -1,0 +1,17 @@
+# 饺子 systemd 服务：开机自启、崩溃自动重启
+# 安装：sudo cp deploy/dumplings.service /etc/systemd/system/
+[Unit]
+Description=Dumplings (饺子) AI chat
+After=network.target mysql.service
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/dumplings
+# 只监听本机，外部访问统一走 Nginx
+ExecStart=/var/www/dumplings/venv/bin/gunicorn -k gthread -w 2 --threads 8 -t 120 -b 127.0.0.1:5100 app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
