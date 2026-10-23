@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 饺子图标前景（自定义矢量图，108x108，主体在中间 66dp 安全区内） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 饺子皮 -->
+    <path
+        android:fillColor="#F6E3BE"
+        android:strokeColor="#D4A86A"
+        android:strokeWidth="2.5"
+        android:strokeLineJoin="round"
+        android:pathData="M26,66 C26,47 39,36 54,36 C69,36 82,47 82,66 C82,72 72,76 54,76 C36,76 26,72 26,66 Z" />
+
+    <!-- 褶子 -->
+    <path
+        android:strokeColor="#D4A86A"
+        android:strokeWidth="2.2"
+        android:strokeLineCap="round"
+        android:pathData="M37,45 Q40.5,49.5 39.5,54.5 M45.5,40 Q48,45 47.5,50.5 M54,38.5 Q55.5,44 54,49.5 M62.5,40 Q60,45 60.5,50.5 M71,45 Q67.5,49.5 68.5,54.5" />
+
+    <!-- 腮红 -->
+    <path
+        android:fillColor="#F4A7A0"
+        android:fillAlpha="0.75"
+        android:pathData="M36.5,66 a3.5,2.6 0 1,0 7,0 a3.5,2.6 0 1,0 -7,0 Z M64.5,66 a3.5,2.6 0 1,0 7,0 a3.5,2.6 0 1,0 -7,0 Z" />
+
+    <!-- 眼睛 -->
+    <path
+        android:fillColor="#3B2F2F"
+        android:pathData="M43.2,61.5 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0 Z M60,61.5 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0 Z" />
+
+    <!-- 嘴巴 -->
+    <path
+        android:strokeColor="#3B2F2F"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M51,65.5 Q54,68.5 57,65.5" />
+</vector>

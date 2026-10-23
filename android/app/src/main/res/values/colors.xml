@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 和网页的浅色主题一致 -->
+    <color name="page_bg">#FFFFFF</color>
+    <color name="text">#1F2328</color>
+    <color name="muted">#6B7280</color>
+    <color name="accent">#10B981</color>
+    <color name="icon_bg">#E7F8F1</color>
+</resources>

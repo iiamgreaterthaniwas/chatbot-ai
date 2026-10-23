@@ -1121,6 +1121,14 @@
     $('menu-btn').onclick = () => app.classList.add('sidebar-open');
     $('overlay').onclick = closeSidebar;
 
+    // 安卓 App 按返回键时调用：依次关闭大图、设置弹窗、侧边栏，返回 true 表示已处理，false 则 App 退出
+    window.jiaoziHandleBack = function () {
+        if (!$('lightbox').hidden) { $('lightbox').hidden = true; return true; }
+        if (!modal.hidden) { closeSettings(); return true; }
+        if (app.classList.contains('sidebar-open')) { closeSidebar(); return true; }
+        return false;
+    };
+
     renderHistory();
     renderMessages();
     refreshHistory();

@@ -5,6 +5,7 @@
 - 用户注册 / 登录，每个用户只能看到自己的对话
 - 每个用户使用自己的 DeepSeek API Key（加密保存在数据库里）
 - 支持发送图片（选择、粘贴或拖入），由 deepseek-flash 识图
+- 安卓 App（WebView 套壳），由 GitHub Actions 云端打包，见 [android/README.md](android/README.md)
 - 对话记录保存在 MySQL：`users`（用户）、`conversations`（对话）、`messages`（对话记录）
 
 ## 本地运行
