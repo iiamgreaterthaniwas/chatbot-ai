@@ -124,12 +124,17 @@ SESSION_COOKIE_SECURE=1
 >
 > ⚠️ `SECRET_KEY` 设置好后**不要再改**，否则所有用户保存的 API Key 都会失效、需要重新登录。
 
-让服务（以 `www-data` 用户运行）能读取 `.env`，其他用户读不到：
+让服务（以 `www-data` 用户运行）能读取 `.env`，其他用户读不到；再建一个存放用户图片的目录，让服务能写入：
 
 ```bash
 sudo chown www-data:www-data /var/www/chatbot-ai/.env
 sudo chmod 600 /var/www/chatbot-ai/.env
+sudo mkdir -p /var/www/chatbot-ai/uploads
+sudo chown www-data:www-data /var/www/chatbot-ai/uploads
+sudo chmod 700 /var/www/chatbot-ai/uploads
 ```
+
+> `uploads` 里是用户发送的图片，已加入 `.gitignore`，`git pull` 不会影响它。备份服务器时记得连同数据库一起备份这个目录。
 
 ---
 
@@ -205,6 +210,16 @@ sudo venv/bin/pip install -r requirements.txt
 sudo systemctl restart dumplings
 ```
 
+如果这次更新改了 `deploy/nginx-dumplings.conf`（比如加图片功能时调大了上传上限），还要重新复制一次 Nginx 配置。
+**注意**：certbot 之前往 `/etc/nginx/conf.d/dumplings.conf` 里加了 HTTPS 配置，直接覆盖会把它冲掉，所以只改对应的那一行：
+
+```bash
+sudo sed -i 's/client_max_body_size .*/client_max_body_size 50m;/' /etc/nginx/conf.d/dumplings.conf
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+> 加图片功能那次更新，还要按第 4 步最后的命令建好 `uploads` 目录。
+
 ---
 
 ## 出问题时怎么查
@@ -219,4 +234,6 @@ sudo systemctl restart dumplings
 | `pip install` 时 cryptography 编译失败 | ARM 服务器偶尔会遇到：`sudo apt install -y build-essential libssl-dev libffi-dev python3-dev` 后重试 |
 | 能打开但登录后又跳回登录页 | 还没配 HTTPS 却设置了 `SESSION_COOKIE_SECURE=1`，先完成第 6 步 |
 | AI 回复不是逐字显示，而是一次性出来 | Nginx 配置里缺少 `proxy_buffering off;` |
+| 发图片提示"上传的内容太大"或 `413` | Nginx 的 `client_max_body_size` 还是旧的 2m，见"以后更新代码" |
+| 发图片报 `Permission denied: .../uploads` | `uploads` 目录不存在或 `www-data` 没有写权限，见第 4 步最后几条命令 |
 | 查看实时日志 | `sudo journalctl -u dumplings -f` |

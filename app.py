@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template, Response, stream_with_context, g, session, redirect
+from flask import Flask, request, jsonify, render_template, Response, stream_with_context, g, session, redirect, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet, InvalidToken
 from openai import OpenAI
@@ -10,6 +10,7 @@ import threading
 import pymysql
 import hashlib
 import base64
+import uuid
 import json
 import re
 import os
@@ -32,6 +33,13 @@ SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",
     "你是「饺子」🥟，一个专业、友好的 AI 助手。请用清晰的结构回答问题，适当使用 Markdown（标题、列表、代码块、表格）。"
 )
+# 用户发送的图片保存在这个目录，数据库里只记文件名
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads"))
+MAX_IMAGES = 4                       # 每条消息最多几张图
+MAX_IMAGE_BYTES = 10 * 1024 * 1024   # 单张图片上限（前端会先压缩，一般远小于这个）
+IMAGE_TYPES = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
+
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_一-龥]{3,20}$")
 
 DB_CONFIG = {
@@ -116,6 +124,17 @@ SCHEMA = [
         INDEX idx_conversation (conversation_id, id),
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对话记录表'""",
+    """CREATE TABLE IF NOT EXISTS message_images (
+        id          INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        message_id  INT UNSIGNED NOT NULL,
+        user_id     INT UNSIGNED NOT NULL COMMENT '冗余存一份，查看图片时直接校验归属',
+        filename    VARCHAR(64) NOT NULL COMMENT 'UPLOAD_DIR 下的文件名',
+        mime        VARCHAR(32) NOT NULL,
+        created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_message (message_id),
+        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消息图片表'""",
 ]
 
 _db_ready = False
@@ -144,6 +163,104 @@ def init_db():
                         "COMMENT '用户自己的 DeepSeek API Key（加密存储）' AFTER password_hash"
                     )
             _db_ready = True
+
+
+# ---------- 图片 ----------
+
+def sniff_image_type(data):
+    """按文件头判断真实格式，不信任前端声明的类型"""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def parse_images(items):
+    """把前端传来的 data URL 列表解析成 [(mime, bytes)]，格式不对抛 ValueError"""
+    if not items:
+        return []
+    if not isinstance(items, list) or len(items) > MAX_IMAGES:
+        raise ValueError(f"每条消息最多发送 {MAX_IMAGES} 张图片")
+    images = []
+    for item in items:
+        match = re.match(r"^data:image/[\w.+-]+;base64,(.+)$", str(item), re.S)
+        if not match:
+            raise ValueError("图片格式不正确")
+        try:
+            data = base64.b64decode(match.group(1), validate=True)
+        except ValueError:
+            raise ValueError("图片数据损坏")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(f"单张图片不能超过 {MAX_IMAGE_BYTES // 1024 // 1024} MB")
+        mime = sniff_image_type(data)
+        if mime is None:
+            raise ValueError("只支持 JPG、PNG、GIF、WebP 格式的图片")
+        images.append((mime, data))
+    return images
+
+
+def to_data_url(mime, data):
+    return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+
+def save_message_images(cur, message_id, user_id, images):
+    """写入图片文件和记录，返回写入的文件名（出错时调用方负责删除）"""
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    saved = []
+    for mime, data in images:
+        filename = f"{uuid.uuid4().hex}.{IMAGE_TYPES[mime]}"
+        with open(os.path.join(UPLOAD_DIR, filename), "wb") as f:
+            f.write(data)
+        saved.append(filename)
+        cur.execute(
+            "INSERT INTO message_images (message_id, user_id, filename, mime) VALUES (%s, %s, %s, %s)",
+            (message_id, user_id, filename, mime)
+        )
+    return saved
+
+
+def load_message_images(cur, message_id):
+    cur.execute("SELECT filename, mime FROM message_images WHERE message_id = %s ORDER BY id", (message_id,))
+    images = []
+    for row in cur.fetchall():
+        try:
+            with open(os.path.join(UPLOAD_DIR, row["filename"]), "rb") as f:
+                images.append((row["mime"], f.read()))
+        except FileNotFoundError:
+            continue
+    return images
+
+
+def delete_image_files(filenames):
+    # 数据库记录已经删掉了，个别文件删不掉只记日志，不影响用户操作
+    for filename in filenames:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, filename))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            app.logger.warning("删除图片文件失败 %s: %s", filename, e)
+
+
+def conversation_image_files(cur, where, params):
+    """删除对话前先查出要删的图片文件（数据库记录会随对话级联删除）"""
+    cur.execute(
+        "SELECT mi.filename FROM message_images mi "
+        "JOIN messages m ON m.id = mi.message_id "
+        "JOIN conversations c ON c.id = m.conversation_id WHERE " + where,
+        params
+    )
+    return [row["filename"] for row in cur.fetchall()]
+
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify({"error": "上传的内容太大了，请减少图片数量或换小一点的图片"}), 413
 
 
 # ---------- 用户 ----------
@@ -296,7 +413,9 @@ def list_conversations():
 def clear_conversations():
     user_id = current_user_id()
     with db() as cur:
+        files = conversation_image_files(cur, "c.user_id = %s", (user_id,))
         cur.execute("DELETE FROM conversations WHERE user_id = %s", (user_id,))
+    delete_image_files(files)
     return jsonify({"ok": True})
 
 
@@ -309,11 +428,23 @@ def conversation_messages(conv_id):
         if conv is None:
             return jsonify({"error": "对话不存在"}), 404
         cur.execute(
-            "SELECT role, content, reasoning FROM messages WHERE conversation_id = %s ORDER BY id",
+            "SELECT id, role, content, reasoning FROM messages WHERE conversation_id = %s ORDER BY id",
             (conv_id,)
         )
         rows = cur.fetchall()
-    return jsonify({"id": conv["id"], "title": conv["title"], "messages": rows})
+        cur.execute(
+            "SELECT mi.id, mi.message_id FROM message_images mi "
+            "JOIN messages m ON m.id = mi.message_id WHERE m.conversation_id = %s ORDER BY mi.id",
+            (conv_id,)
+        )
+        images = {}
+        for img in cur.fetchall():
+            images.setdefault(img["message_id"], []).append(f"/api/images/{img['id']}")
+    messages = [
+        {"role": r["role"], "content": r["content"], "reasoning": r["reasoning"], "images": images.get(r["id"], [])}
+        for r in rows
+    ]
+    return jsonify({"id": conv["id"], "title": conv["title"], "messages": messages})
 
 
 @app.route('/api/conversations/<int:conv_id>', methods=['DELETE'])
@@ -321,8 +452,27 @@ def conversation_messages(conv_id):
 def delete_conversation(conv_id):
     user_id = current_user_id()
     with db() as cur:
+        files = conversation_image_files(cur, "c.id = %s AND c.user_id = %s", (conv_id, user_id))
         cur.execute("DELETE FROM conversations WHERE id = %s AND user_id = %s", (conv_id, user_id))
+    delete_image_files(files)
     return jsonify({"ok": True})
+
+
+@app.route('/api/images/<int:image_id>')
+@login_required
+def get_image(image_id):
+    with db() as cur:
+        cur.execute(
+            "SELECT filename, mime FROM message_images WHERE id = %s AND user_id = %s",
+            (image_id, current_user_id())
+        )
+        row = cur.fetchone()
+    path = os.path.join(UPLOAD_DIR, row["filename"]) if row else None
+    if path is None or not os.path.exists(path):
+        return jsonify({"error": "图片不存在"}), 404
+    response = send_file(path, mimetype=row["mime"], max_age=7 * 24 * 3600)
+    response.headers["Cache-Control"] = "private, max-age=604800"
+    return response
 
 
 def ndjson(obj):
@@ -340,57 +490,75 @@ def chat():
     conv_id = data.get('conversation_id')
     regenerate = bool(data.get('regenerate'))
     user_message = str(data.get('message') or '').strip()
+    try:
+        images = [] if regenerate else parse_images(data.get('images'))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
-    with db() as cur:
-        if conv_id:
-            if get_conversation(cur, conv_id, user_id) is None:
-                return jsonify({"error": "对话不存在"}), 404
-        elif regenerate:
-            return jsonify({"error": "缺少对话 ID"}), 400
+    saved_files = []
+    try:
+        with db() as cur:
+            if conv_id:
+                if get_conversation(cur, conv_id, user_id) is None:
+                    return jsonify({"error": "对话不存在"}), 404
+            elif regenerate:
+                return jsonify({"error": "缺少对话 ID"}), 400
 
-        if regenerate:
-            # 重新生成：删掉最后一条 AI 回复，用最后一条用户消息重新提问
-            cur.execute(
-                "SELECT id, role, content FROM messages WHERE conversation_id = %s ORDER BY id DESC LIMIT 1",
-                (conv_id,)
-            )
-            last = cur.fetchone()
-            if last is None:
-                return jsonify({"error": "没有可以重新生成的消息"}), 400
-            if last["role"] == "assistant":
-                cur.execute("DELETE FROM messages WHERE id = %s", (last["id"],))
+            if regenerate:
+                # 重新生成：删掉最后一条 AI 回复，用最后一条用户消息（连同图片）重新提问
                 cur.execute(
-                    "SELECT content FROM messages WHERE conversation_id = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
+                    "SELECT id, role, content FROM messages WHERE conversation_id = %s ORDER BY id DESC LIMIT 1",
                     (conv_id,)
                 )
                 last = cur.fetchone()
                 if last is None:
                     return jsonify({"error": "没有可以重新生成的消息"}), 400
-            user_message = last["content"]
-        else:
-            if not user_message:
-                return jsonify({"error": "消息不能为空"}), 400
-            if not conv_id:
+                if last["role"] == "assistant":
+                    cur.execute("DELETE FROM messages WHERE id = %s", (last["id"],))
+                    cur.execute(
+                        "SELECT id, content FROM messages WHERE conversation_id = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
+                        (conv_id,)
+                    )
+                    last = cur.fetchone()
+                    if last is None:
+                        return jsonify({"error": "没有可以重新生成的消息"}), 400
+                user_message = last["content"]
+                images = load_message_images(cur, last["id"])
+            else:
+                if not user_message and not images:
+                    return jsonify({"error": "消息不能为空"}), 400
+                if not conv_id:
+                    title = user_message[:30] or "[图片]"
+                    cur.execute("INSERT INTO conversations (user_id, title) VALUES (%s, %s)", (user_id, title))
+                    conv_id = cur.lastrowid
                 cur.execute(
-                    "INSERT INTO conversations (user_id, title) VALUES (%s, %s)", (user_id, user_message[:30])
+                    "INSERT INTO messages (conversation_id, role, content) VALUES (%s, 'user', %s)",
+                    (conv_id, user_message)
                 )
-                conv_id = cur.lastrowid
-            cur.execute(
-                "INSERT INTO messages (conversation_id, role, content) VALUES (%s, 'user', %s)",
-                (conv_id, user_message)
-            )
-        cur.execute("UPDATE conversations SET updated_at = NOW() WHERE id = %s", (conv_id,))
+                saved_files = save_message_images(cur, cur.lastrowid, user_id, images)
+            cur.execute("UPDATE conversations SET updated_at = NOW() WHERE id = %s", (conv_id,))
+    except Exception:
+        # 数据库已回滚，把写到一半的图片文件也删掉
+        delete_image_files(saved_files)
+        raise
+
+    # 有图片时按 DeepSeek 的多模态格式发送：图片在前，文字在后
+    if images:
+        user_content = [{"type": "image_url", "image_url": {"url": to_data_url(m, d)}} for m, d in images]
+        user_content.append({"type": "text", "text": user_message or "请描述一下这张图片。"})
+    else:
+        user_content = user_message
 
     def generate():
         content, reasoning = [], []
-        yield ndjson({"conversation_id": conv_id, "title": user_message[:30]})
+        yield ndjson({"conversation_id": conv_id, "title": user_message[:30] or "[图片]"})
         try:
             # 只发送当前这一条消息，不带历史上下文，节省 token
             stream = make_client(api_key).chat.completions.create(
                 model=MODEL,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message}
+                    {"role": "user", "content": user_content}
                 ],
                 stream=True
             )

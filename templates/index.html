@@ -201,6 +201,13 @@
             padding: 10px 16px; border-radius: 18px 18px 4px 18px;
             max-width: 80%; white-space: pre-wrap; word-break: break-word;
         }
+        .bubble-images { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+        .bubble-images + .bubble-text { margin-top: 8px; }
+        .bubble-images img {
+            width: 160px; height: 160px; object-fit: cover; border-radius: 10px;
+            cursor: zoom-in; background: var(--hover); display: block;
+        }
+        .bubble-images img:only-child { width: auto; height: auto; max-width: min(280px, 100%); max-height: 320px; }
         .avatar {
             width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0;
             background: var(--accent-soft);
@@ -283,19 +290,40 @@
         .composer-wrap { padding: 0 20px 14px; flex-shrink: 0; }
         .composer {
             max-width: 780px; margin: 0 auto;
-            display: flex; align-items: flex-end; gap: 8px;
+            display: flex; flex-direction: column; gap: 8px;
             border: 1px solid var(--border); border-radius: 18px;
             background: var(--surface);
-            padding: 10px 10px 10px 16px;
+            padding: 10px;
             box-shadow: var(--shadow);
-            transition: border-color .15s;
+            transition: border-color .15s, box-shadow .15s;
         }
         .composer:focus-within { border-color: var(--accent); }
+        .composer.dragging { border-color: var(--accent); border-style: dashed; box-shadow: 0 0 0 4px var(--accent-soft); }
+        .composer-row { display: flex; align-items: flex-end; gap: 6px; }
+        .attach-btn { width: 36px; height: 36px; flex-shrink: 0; }
+        .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 2px 0; }
+        .attachments[hidden] { display: none; }
+        .attachment { position: relative; width: 64px; height: 64px; }
+        .attachment img { width: 100%; height: 100%; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); display: block; }
+        .attachment.loading { border-radius: 10px; background: var(--hover); animation: blink 1.2s infinite ease-in-out; }
+        .attachment .remove {
+            position: absolute; top: -6px; right: -6px;
+            width: 20px; height: 20px; border-radius: 50%;
+            background: var(--text); color: var(--bg);
+            display: grid; place-items: center; font-size: 13px; line-height: 1;
+        }
         .composer textarea {
             flex: 1; resize: none; border: none; outline: none; background: transparent;
             color: var(--text); font: inherit; line-height: 1.5;
-            max-height: 200px; padding: 6px 0;
+            max-height: 200px; padding: 6px 0; min-width: 0;
         }
+        .lightbox {
+            position: fixed; inset: 0; z-index: 90; background: rgba(0, 0, 0, .85);
+            display: grid; place-items: center; padding: 20px; cursor: zoom-out;
+            animation: fadeIn .15s ease;
+        }
+        .lightbox[hidden] { display: none; }
+        .lightbox img { max-width: 100%; max-height: 100%; border-radius: 8px; }
         .composer textarea::placeholder { color: var(--muted); }
         .send-btn {
             width: 36px; height: 36px; border-radius: 10px;
@@ -451,17 +479,25 @@
         </button>
 
         <div class="composer-wrap">
-            <div class="composer">
-                <textarea id="input" rows="1" placeholder="问问饺子…"></textarea>
-                <button class="send-btn" id="send-btn" disabled aria-label="发送">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-                </button>
+            <div class="composer" id="composer">
+                <div class="attachments" id="attachments" hidden></div>
+                <div class="composer-row">
+                    <button class="icon-btn attach-btn" id="attach-btn" aria-label="添加图片" title="添加图片（也可以直接粘贴或拖进来）">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg>
+                    </button>
+                    <input type="file" id="file-input" accept="image/*" multiple hidden>
+                    <textarea id="input" rows="1" placeholder="问问饺子…"></textarea>
+                    <button class="send-btn" id="send-btn" disabled aria-label="发送">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+                    </button>
+                </div>
             </div>
             <div class="disclaimer">AI 生成的内容可能有误，请注意核实重要信息</div>
         </div>
     </main>
 </div>
 <div class="toast" id="toast"></div>
+<div class="lightbox" id="lightbox" hidden><img alt="查看大图"></div>
 
 <div class="modal-backdrop" id="settings-modal" hidden>
     <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -527,6 +563,8 @@
     let controller = null;
     let autoScroll = true;
     let hasApiKey = {{ 'true' if has_api_key else 'false' }};
+    let pendingImages = [];   // 待发送图片的 data URL
+    let pendingLoads = 0;     // 正在压缩的图片数量
 
     // ---------- 接口 ----------
     async function api(url, options) {
@@ -674,7 +712,26 @@
         el.className = 'msg ' + msg.role + (isLast ? ' last' : '');
         if (msg.role === 'user') {
             el.innerHTML = '<div class="bubble"></div>';
-            el.querySelector('.bubble').textContent = msg.content;
+            const bubble = el.querySelector('.bubble');
+            if (msg.images && msg.images.length) {
+                const grid = document.createElement('div');
+                grid.className = 'bubble-images';
+                msg.images.forEach(src => {
+                    const img = document.createElement('img');
+                    img.src = src;
+                    img.alt = '图片';
+                    img.loading = 'lazy';
+                    img.onclick = () => openLightbox(src);
+                    grid.appendChild(img);
+                });
+                bubble.appendChild(grid);
+            }
+            if (msg.content) {
+                const text = document.createElement('div');
+                text.className = 'bubble-text';
+                text.textContent = msg.content;
+                bubble.appendChild(text);
+            }
         } else {
             el.innerHTML = '<div class="avatar">' + ICONS.logo + '</div><div class="body"></div>';
             fillAssistant(el, msg, false);
@@ -765,21 +822,25 @@
     // ---------- 发送 ----------
     function send(text) {
         text = (text || '').trim();
-        if (!text || controller) return;
+        if ((!text && !pendingImages.length) || controller) return;
+        if (pendingLoads) return toast('图片还在处理中，请稍等');
         if (!hasApiKey) return openSettings('发送消息前，请先填写你的 DeepSeek API Key');
+        const images = pendingImages.slice();
         let conv = current();
         if (!conv) {
             // id 由服务器创建对话后返回
-            conv = { id: null, title: text.slice(0, 30), messages: [] };
+            conv = { id: null, title: text.slice(0, 30) || '[图片]', messages: [] };
             currentConv = conv;
         }
         // 最近活跃的对话移到最上面
         conversations = [conv].concat(conversations.filter(c => c !== conv));
         conv.messages = conv.messages || [];
-        conv.messages.push({ role: 'user', content: text });
+        conv.messages.push({ role: 'user', content: text, images: images });
         input.value = '';
+        pendingImages = [];
+        renderAttachments();
         resizeInput();
-        startReply(conv, { message: text });
+        startReply(conv, { message: text, images: images });
     }
 
     function regenerate() {
@@ -877,10 +938,114 @@
         } else {
             sendBtn.classList.remove('stop');
             sendBtn.innerHTML = ICONS.send;
-            sendBtn.disabled = !input.value.trim();
+            sendBtn.disabled = !input.value.trim() && !pendingImages.length;
             sendBtn.setAttribute('aria-label', '发送');
         }
     }
+
+    // ---------- 图片 ----------
+    const MAX_IMAGES = 4;
+    const MAX_SIDE = 2048;
+    function readAsDataURL(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(new Error('读取图片失败'));
+            reader.readAsDataURL(blob);
+        });
+    }
+    // 大图先在浏览器里缩小再上传：传得快，也更省 token
+    async function compressImage(file) {
+        const url = URL.createObjectURL(file);
+        try {
+            const img = await new Promise((resolve, reject) => {
+                const i = new Image();
+                i.onload = () => resolve(i);
+                i.onerror = () => reject(new Error('无法识别这张图片'));
+                i.src = url;
+            });
+            const scale = Math.min(1, MAX_SIDE / Math.max(img.naturalWidth, img.naturalHeight));
+            // 尺寸不大、格式支持的小图原样发送（保留 GIF 动图和 PNG 透明背景）
+            if (scale === 1 && file.size <= 1.5 * 1024 * 1024 && /^image\/(jpeg|png|gif|webp)$/.test(file.type)) {
+                return await readAsDataURL(file);
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.round(img.naturalWidth * scale);
+            canvas.height = Math.round(img.naturalHeight * scale);
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+            return canvas.toDataURL('image/jpeg', 0.85);
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+    }
+    async function addFiles(fileList) {
+        const files = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+        if (!files.length) return toast('只能添加图片');
+        const room = MAX_IMAGES - pendingImages.length - pendingLoads;
+        if (room <= 0) return toast('每条消息最多 ' + MAX_IMAGES + ' 张图片');
+        if (files.length > room) toast('每条消息最多 ' + MAX_IMAGES + ' 张图片，多出的已忽略');
+        const batch = files.slice(0, room);
+        pendingLoads += batch.length;
+        renderAttachments();
+        // 并行压缩，但按选择的顺序加入
+        const results = await Promise.all(batch.map(file => compressImage(file).catch(e => { toast(e.message); return null; })));
+        pendingLoads -= batch.length;
+        results.forEach(url => { if (url) pendingImages.push(url); });
+        renderAttachments();
+        input.focus();
+    }
+    function renderAttachments() {
+        const box = $('attachments');
+        box.innerHTML = '';
+        pendingImages.forEach((src, i) => {
+            const item = document.createElement('div');
+            item.className = 'attachment';
+            item.innerHTML = '<img alt="待发送的图片"><button class="remove" type="button" aria-label="移除图片">×</button>';
+            item.querySelector('img').src = src;
+            item.querySelector('img').onclick = () => openLightbox(src);
+            item.querySelector('.remove').onclick = () => { pendingImages.splice(i, 1); renderAttachments(); };
+            box.appendChild(item);
+        });
+        for (let i = 0; i < pendingLoads; i++) {
+            const item = document.createElement('div');
+            item.className = 'attachment loading';
+            box.appendChild(item);
+        }
+        box.hidden = !pendingImages.length && !pendingLoads;
+        updateSendBtn();
+    }
+    function openLightbox(src) {
+        $('lightbox').querySelector('img').src = src;
+        $('lightbox').hidden = false;
+    }
+    $('lightbox').onclick = () => { $('lightbox').hidden = true; };
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('lightbox').hidden = true; });
+
+    $('attach-btn').onclick = () => $('file-input').click();
+    $('file-input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
+    // 直接粘贴截图
+    input.addEventListener('paste', (e) => {
+        const files = Array.from((e.clipboardData && e.clipboardData.files) || []).filter(f => f.type.startsWith('image/'));
+        if (files.length) { e.preventDefault(); addFiles(files); }
+    });
+    // 把图片拖进聊天区域
+    const composer = $('composer');
+    const mainEl = document.querySelector('.main');
+    let dragDepth = 0;
+    const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+    mainEl.addEventListener('dragenter', (e) => { if (hasFiles(e)) { dragDepth++; composer.classList.add('dragging'); } });
+    mainEl.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; composer.classList.remove('dragging'); } });
+    mainEl.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+    mainEl.addEventListener('drop', (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        dragDepth = 0;
+        composer.classList.remove('dragging');
+        addFiles(e.dataTransfer.files);
+    });
     input.addEventListener('input', resizeInput);
     input.addEventListener('keydown', (e) => {
         // isComposing：中文输入法选词时按 Enter 不发送
