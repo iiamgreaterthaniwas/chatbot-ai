@@ -155,15 +155,42 @@
             flex: 1; font-weight: 600; font-size: 15px;
             overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
         }
-        .model-badge {
+        .model-picker { position: relative; flex-shrink: 0; }
+        .model-btn {
             display: inline-flex; align-items: center; gap: 6px;
-            font-size: 12px; color: var(--muted);
+            font-size: 13px; color: var(--text); font-weight: 500;
             border: 1px solid var(--border); border-radius: 999px;
-            padding: 3px 10px;
+            padding: 5px 10px 5px 12px;
+            transition: background .15s, border-color .15s;
         }
-        .model-badge::before {
+        .model-btn:hover, .model-btn[aria-expanded="true"] { background: var(--hover); }
+        .model-btn::before {
             content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
         }
+        .model-btn svg { width: 14px; height: 14px; color: var(--muted); }
+        .model-menu {
+            position: absolute; right: 0; top: calc(100% + 6px); z-index: 60;
+            width: 280px; max-width: calc(100vw - 24px);
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: 12px; box-shadow: var(--shadow); padding: 6px;
+            animation: fadeIn .12s ease;
+        }
+        .model-menu[hidden] { display: none; }
+        .model-option {
+            display: flex; gap: 10px; align-items: flex-start;
+            width: 100%; text-align: left; padding: 9px 10px; border-radius: 8px;
+        }
+        .model-option:hover { background: var(--hover); }
+        .model-option .check { width: 16px; height: 16px; margin-top: 2px; color: var(--accent); visibility: hidden; flex-shrink: 0; }
+        .model-option.selected .check { visibility: visible; }
+        .model-option .name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 6px; }
+        .model-option .name small {
+            font-weight: 400; font-size: 11px; color: var(--muted);
+            border: 1px solid var(--border); border-radius: 5px; padding: 0 5px;
+        }
+        .model-option .desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+        .model-option .price { font-size: 11px; color: var(--muted); margin-top: 3px; opacity: .85; }
+        .msg-usage .model-tag { font-weight: 500; }
 
         .messages { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
         .messages-inner { max-width: 780px; margin: 0 auto; padding: 24px 20px 32px; }
@@ -215,7 +242,14 @@
         }
         .avatar { font-size: 18px; line-height: 1; }
         .msg.assistant .body { flex: 1; min-width: 0; }
-        .msg-actions { display: flex; gap: 2px; margin-top: 6px; opacity: 0; transition: opacity .15s; }
+        .msg-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin-top: 6px; }
+        .msg-usage { font-size: 12px; color: var(--muted); cursor: help; }
+        .msg-usage .ctx-tag {
+            color: var(--accent-hover); background: var(--accent-soft);
+            border-radius: 5px; padding: 1px 6px; margin-right: 4px;
+        }
+        :root[data-theme="dark"] .msg-usage .ctx-tag { color: var(--accent); }
+        .msg-actions { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
         .msg:hover .msg-actions, .msg.last .msg-actions { opacity: 1; }
         .msg-actions button {
             display: flex; align-items: center; gap: 4px;
@@ -301,6 +335,17 @@
         .composer.dragging { border-color: var(--accent); border-style: dashed; box-shadow: 0 0 0 4px var(--accent-soft); }
         .composer-row { display: flex; align-items: flex-end; gap: 6px; }
         .attach-btn { width: 36px; height: 36px; flex-shrink: 0; }
+        .ctx-toggle {
+            height: 36px; padding: 0 10px; flex-shrink: 0;
+            display: flex; align-items: center; gap: 5px;
+            border: 1px solid var(--border); border-radius: 999px;
+            font-size: 13px; color: var(--muted);
+            transition: background .15s, color .15s, border-color .15s;
+        }
+        .ctx-toggle svg { width: 16px; height: 16px; }
+        .ctx-toggle:hover { background: var(--hover); color: var(--text); }
+        .ctx-toggle.active { background: var(--accent-soft); color: var(--accent-hover); border-color: var(--accent); }
+        :root[data-theme="dark"] .ctx-toggle.active { color: var(--accent); }
         .attachments { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 2px 0; }
         .attachments[hidden] { display: none; }
         .attachment { position: relative; width: 64px; height: 64px; }
@@ -413,7 +458,7 @@
                 display: block; position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.35);
             }
             .menu-btn { display: grid; }
-            .model-badge { display: none; }
+            .model-btn { padding: 4px 8px 4px 10px; font-size: 12px; }
             .topbar { padding: 0 8px; }
             .messages-inner { padding: 16px 16px 24px; }
             .composer-wrap { padding: 0 12px 10px; }
@@ -422,6 +467,8 @@
             .msg.user .bubble { max-width: 88%; }
             .msg { gap: 10px; }
             .msg-actions { opacity: 1; }
+            .ctx-toggle .label { display: none; }
+            .ctx-toggle { padding: 0 9px; }
         }
     </style>
 </head>
@@ -467,7 +514,13 @@
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
             </button>
             <div class="topbar-title" id="topbar-title">新对话</div>
-            <span class="model-badge">{{ model }}</span>
+            <div class="model-picker">
+                <button class="model-btn" id="model-btn" type="button" aria-haspopup="listbox" aria-expanded="false" title="切换模型">
+                    <span id="model-label"></span>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+                <div class="model-menu" id="model-menu" role="listbox" aria-label="选择模型" hidden></div>
+            </div>
         </header>
 
         <section class="messages" id="messages">
@@ -486,6 +539,10 @@
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg>
                     </button>
                     <input type="file" id="file-input" accept="image/*" multiple hidden>
+                    <button class="ctx-toggle" id="ctx-toggle" type="button" aria-pressed="false">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+                        <span class="label">连续对话</span>
+                    </button>
                     <textarea id="input" rows="1" placeholder="问问饺子…"></textarea>
                     <button class="send-btn" id="send-btn" disabled aria-label="发送">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
@@ -770,7 +827,11 @@
                 retry.onclick = regenerate;
                 actions.appendChild(retry);
             }
-            body.appendChild(actions);
+            const footer = document.createElement('div');
+            footer.className = 'msg-footer';
+            footer.appendChild(actions);
+            if (msg.usage) footer.appendChild(createUsageEl(msg.usage));
+            body.appendChild(footer);
         }
     }
 
@@ -825,6 +886,9 @@
         if ((!text && !pendingImages.length) || controller) return;
         if (pendingLoads) return toast('图片还在处理中，请稍等');
         if (!hasApiKey) return openSettings('发送消息前，请先填写你的 DeepSeek API Key');
+        if (pendingImages.length && !modelInfo().vision) {
+            return toast(modelInfo().label + ' 不支持图片，请切换到 ' + visionModelLabel() + ' 或移除图片');
+        }
         const images = pendingImages.slice();
         let conv = current();
         if (!conv) {
@@ -840,16 +904,20 @@
         pendingImages = [];
         renderAttachments();
         resizeInput();
-        startReply(conv, { message: text, images: images });
+        startReply(conv, { message: text, images: images, context: contextOn, model: currentModel });
     }
 
     function regenerate() {
         const conv = current();
         if (!conv || !conv.id || controller) return;
+        const lastQuestion = conv.messages.filter(m => m.role === 'user').pop();
+        if (lastQuestion && lastQuestion.images && lastQuestion.images.length && !modelInfo().vision) {
+            return toast('这条消息带有图片，' + modelInfo().label + ' 不支持图片，请切换到 ' + visionModelLabel() + ' 再重新生成');
+        }
         const last = conv.messages[conv.messages.length - 1];
         if (last && last.role === 'assistant') conv.messages.pop();
         if (!conv.messages.length) return;
-        startReply(conv, { regenerate: true });
+        startReply(conv, { regenerate: true, context: contextOn, model: currentModel });
     }
 
     async function startReply(conv, request) {
@@ -906,6 +974,7 @@
                     if (data.conversation_id && !conv.id) { conv.id = data.conversation_id; renderHistory(); }
                     if (data.reasoning) reply.reasoning += data.reasoning;
                     if (data.delta) reply.content += data.delta;
+                    if (data.usage) reply.usage = data.usage;
                     repaint();
                 }
             }
@@ -1024,6 +1093,103 @@
     $('lightbox').onclick = () => { $('lightbox').hidden = true; };
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('lightbox').hidden = true; });
 
+    // ---------- 连续对话开关 & 用量显示 ----------
+    const CONTEXT_KEY = 'jiaozi-context';
+    const CONTEXT_ROUNDS = {{ context_rounds }};
+    let contextOn = false;
+    try { contextOn = localStorage.getItem(CONTEXT_KEY) === '1'; } catch (e) {}
+    function applyContextToggle() {
+        const btn = $('ctx-toggle');
+        btn.classList.toggle('active', contextOn);
+        btn.setAttribute('aria-pressed', String(contextOn));
+        btn.title = contextOn
+            ? '连续对话已开启：会带上最近 ' + CONTEXT_ROUNDS + ' 轮对话，AI 能理解上下文，但消耗更多 token。点击关闭'
+            : '连续对话已关闭：只发送当前这条消息，最省 token。点击开启后会带上最近 ' + CONTEXT_ROUNDS + ' 轮对话';
+    }
+    $('ctx-toggle').onclick = () => {
+        contextOn = !contextOn;
+        try { localStorage.setItem(CONTEXT_KEY, contextOn ? '1' : '0'); } catch (e) {}
+        applyContextToggle();
+        toast(contextOn ? '已开启连续对话：会带上最近 ' + CONTEXT_ROUNDS + ' 轮，消耗更多 token' : '已关闭连续对话：只发送当前消息');
+    };
+    applyContextToggle();
+
+    // ---------- 模型切换 ----------
+    const MODEL_KEY = 'jiaozi-model';
+    const MODELS = {{ models | tojson }};
+    const DEFAULT_MODEL = {{ default_model | tojson }};
+    let currentModel = DEFAULT_MODEL;
+    try {
+        const saved = localStorage.getItem(MODEL_KEY);
+        if (MODELS.some(m => m.id === saved)) currentModel = saved;
+    } catch (e) {}
+    function modelInfo(id) { return MODELS.find(m => m.id === (id || currentModel)) || MODELS[0]; }
+    function visionModelLabel() { const m = MODELS.find(x => x.vision); return m ? m.label : '支持识图的模型'; }
+    const modelMenu = $('model-menu');
+    const modelBtn = $('model-btn');
+    function renderModelPicker() {
+        $('model-label').textContent = modelInfo().label;
+        modelBtn.title = '当前模型：' + currentModel + '（点击切换）';
+        modelMenu.innerHTML = '';
+        MODELS.forEach(m => {
+            const opt = document.createElement('button');
+            opt.type = 'button';
+            opt.className = 'model-option' + (m.id === currentModel ? ' selected' : '');
+            opt.setAttribute('role', 'option');
+            opt.setAttribute('aria-selected', String(m.id === currentModel));
+            opt.innerHTML = '<svg class="check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5 9-10"/></svg>'
+                + '<div><div class="name"></div><div class="desc"></div><div class="price"></div></div>';
+            const name = opt.querySelector('.name');
+            name.textContent = m.label;
+            const idTag = document.createElement('small');
+            idTag.textContent = m.id;
+            name.appendChild(idTag);
+            opt.querySelector('.desc').textContent = m.desc;
+            opt.querySelector('.price').textContent = '输入 ¥' + m.price[1] + ' / 输出 ¥' + m.price[2] + ' 每百万 tokens（空闲时段）';
+            opt.onclick = () => selectModel(m.id);
+            modelMenu.appendChild(opt);
+        });
+    }
+    function selectModel(id) {
+        currentModel = id;
+        try { localStorage.setItem(MODEL_KEY, id); } catch (e) {}
+        renderModelPicker();
+        closeModelMenu();
+        let msg = '已切换到 ' + modelInfo().label;
+        if (!modelInfo().vision && pendingImages.length) msg += '（注意：它不支持图片，发送前请移除图片）';
+        toast(msg);
+    }
+    function closeModelMenu() { modelMenu.hidden = true; modelBtn.setAttribute('aria-expanded', 'false'); }
+    modelBtn.onclick = (e) => {
+        e.stopPropagation();
+        const open = modelMenu.hidden;
+        modelMenu.hidden = !open;
+        modelBtn.setAttribute('aria-expanded', String(open));
+    };
+    document.addEventListener('click', (e) => { if (!modelMenu.hidden && !modelMenu.contains(e.target)) closeModelMenu(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModelMenu(); });
+    renderModelPicker();
+
+    function createUsageEl(u) {
+        const n = (x) => Number(x || 0).toLocaleString('zh-CN');
+        const el = document.createElement('span');
+        el.className = 'msg-usage';
+        let text = '输入 ' + n(u.prompt_tokens) + ' · 输出 ' + n(u.completion_tokens) + ' tokens';
+        if (u.model_label) text = u.model_label + ' · ' + text;
+        if (u.cost != null) text += ' · ' + (u.cost < 0.0001 ? '不到 ¥0.0001' : '约 ¥' + Number(u.cost).toFixed(4));
+        if (u.with_context) {
+            const tag = document.createElement('span');
+            tag.className = 'ctx-tag';
+            tag.textContent = '连续对话';
+            el.appendChild(tag);
+        }
+        el.appendChild(document.createTextNode(text));
+        el.title = '输入 ' + n(u.prompt_tokens) + ' tokens（其中缓存命中 ' + n(u.cache_hit_tokens) + '，按更低价格计费）\n'
+            + '输出 ' + n(u.completion_tokens) + ' tokens（含思考过程）\n'
+            + '费用按 DeepSeek 官方价格和当时是否高峰时段估算，以 DeepSeek 账单为准';
+        return el;
+    }
+
     $('attach-btn').onclick = () => $('file-input').click();
     $('file-input').onchange = (e) => { addFiles(e.target.files); e.target.value = ''; };
     // 直接粘贴截图
@@ -1124,6 +1290,7 @@
     // 安卓 App 按返回键时调用：依次关闭大图、设置弹窗、侧边栏，返回 true 表示已处理，false 则 App 退出
     window.jiaoziHandleBack = function () {
         if (!$('lightbox').hidden) { $('lightbox').hidden = true; return true; }
+        if (!modelMenu.hidden) { closeModelMenu(); return true; }
         if (!modal.hidden) { closeSettings(); return true; }
         if (app.classList.contains('sidebar-open')) { closeSidebar(); return true; }
         return false;

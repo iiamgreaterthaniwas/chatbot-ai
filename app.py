@@ -4,7 +4,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from openai import OpenAI
 from dotenv import load_dotenv
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 import threading
 import pymysql
@@ -28,7 +28,27 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # 部署到 HTTPS 后设为 1，登录 cookie 只通过 HTTPS 传输
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE") == "1"
 
-MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
+# 用户可以切换的模型。price = (输入缓存命中, 输入未命中, 输出)，单位：元 / 百万 tokens，空闲时段价格；
+# 高峰时段（北京时间工作日 9-12 点、14-18 点）自动按 2 倍计算。
+# 价格以 https://api-docs.deepseek.com/zh-cn/quick_start/pricing 为准，官方调价后改这里
+MODELS = {
+    "deepseek-flash": {
+        "label": "Flash", "desc": "速度快、价格低，支持识图",
+        "vision": True, "price": (0.02, 1, 4),
+    },
+    "deepseek-v4-pro": {
+        "label": "Pro", "desc": "能力更强，价格约为 Flash 的 3 倍，不支持图片",
+        "vision": False, "price": (0.15, 4.5, 13.5),
+    },
+}
+DEFAULT_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
+if DEFAULT_MODEL not in MODELS:
+    # .env 里配了列表外的模型：加进列表，价格先按 Flash 估算
+    MODELS[DEFAULT_MODEL] = dict(MODELS["deepseek-flash"], label=DEFAULT_MODEL, desc="自定义模型")
+
+# 打开"连续对话"时最多带上最近几轮（一问一答算一轮）
+CONTEXT_ROUNDS = int(os.environ.get("CONTEXT_ROUNDS", 3))
+BEIJING = timezone(timedelta(hours=8))
 SYSTEM_PROMPT = os.environ.get(
     "SYSTEM_PROMPT",
     "你是「饺子」🥟，一个专业、友好的 AI 助手。请用清晰的结构回答问题，适当使用 Markdown（标题、列表、代码块、表格）。"
@@ -120,6 +140,12 @@ SCHEMA = [
         role             ENUM('user', 'assistant') NOT NULL,
         content          MEDIUMTEXT NOT NULL,
         reasoning        MEDIUMTEXT NULL COMMENT '推理模型的思考过程',
+        prompt_tokens      INT UNSIGNED NULL COMMENT '输入 tokens（AI 回复才有）',
+        cache_hit_tokens   INT UNSIGNED NULL COMMENT '其中命中缓存的输入 tokens',
+        completion_tokens  INT UNSIGNED NULL COMMENT '输出 tokens（含思考过程）',
+        cost               DECIMAL(12, 6) NULL COMMENT '按当时价格估算的费用（元）',
+        with_context       TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否带了上下文（连续对话）',
+        model              VARCHAR(64) NULL COMMENT '回复用的模型',
         created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_conversation (conversation_id, id),
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
@@ -137,6 +163,17 @@ SCHEMA = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='消息图片表'""",
 ]
 
+# (表, 字段, 定义)：给已经建好的旧表补字段
+MIGRATIONS = [
+    ("users", "api_key", "VARCHAR(512) NULL COMMENT '用户自己的 DeepSeek API Key（加密存储）' AFTER password_hash"),
+    ("messages", "prompt_tokens", "INT UNSIGNED NULL COMMENT '输入 tokens（AI 回复才有）' AFTER reasoning"),
+    ("messages", "cache_hit_tokens", "INT UNSIGNED NULL COMMENT '其中命中缓存的输入 tokens' AFTER prompt_tokens"),
+    ("messages", "completion_tokens", "INT UNSIGNED NULL COMMENT '输出 tokens（含思考过程）' AFTER cache_hit_tokens"),
+    ("messages", "cost", "DECIMAL(12, 6) NULL COMMENT '按当时价格估算的费用（元）' AFTER completion_tokens"),
+    ("messages", "with_context", "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否带了上下文（连续对话）' AFTER cost"),
+    ("messages", "model", "VARCHAR(64) NULL COMMENT '回复用的模型' AFTER with_context"),
+]
+
 _db_ready = False
 _db_lock = threading.Lock()
 
@@ -152,16 +189,15 @@ def init_db():
             with db() as cur:
                 for sql in SCHEMA:
                     cur.execute(sql)
-                # 旧版 users 表没有 api_key 字段，自动补上
-                cur.execute(
-                    "SELECT COUNT(*) AS n FROM information_schema.COLUMNS "
-                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' AND COLUMN_NAME = 'api_key'"
-                )
-                if cur.fetchone()["n"] == 0:
+                # 旧版表缺少的字段自动补上
+                for table, column, definition in MIGRATIONS:
                     cur.execute(
-                        "ALTER TABLE users ADD COLUMN api_key VARCHAR(512) NULL "
-                        "COMMENT '用户自己的 DeepSeek API Key（加密存储）' AFTER password_hash"
+                        "SELECT COUNT(*) AS n FROM information_schema.COLUMNS "
+                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+                        (table, column)
                     )
+                    if cur.fetchone()["n"] == 0:
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             _db_ready = True
 
 
@@ -361,7 +397,10 @@ def index():
     if user is None:
         return redirect('/login')
     return render_template(
-        'index.html', model=MODEL, username=user["username"],
+        'index.html', username=user["username"], context_rounds=CONTEXT_ROUNDS,
+        default_model=DEFAULT_MODEL,
+        models=[{"id": k, "label": v["label"], "desc": v["desc"], "vision": v["vision"], "price": v["price"]}
+                for k, v in MODELS.items()],
         has_api_key=decrypt_api_key(user["api_key"]) is not None
     )
 
@@ -428,7 +467,8 @@ def conversation_messages(conv_id):
         if conv is None:
             return jsonify({"error": "对话不存在"}), 404
         cur.execute(
-            "SELECT id, role, content, reasoning FROM messages WHERE conversation_id = %s ORDER BY id",
+            "SELECT id, role, content, reasoning, prompt_tokens, cache_hit_tokens, completion_tokens, cost, with_context, model "
+            "FROM messages WHERE conversation_id = %s ORDER BY id",
             (conv_id,)
         )
         rows = cur.fetchall()
@@ -441,7 +481,8 @@ def conversation_messages(conv_id):
         for img in cur.fetchall():
             images.setdefault(img["message_id"], []).append(f"/api/images/{img['id']}")
     messages = [
-        {"role": r["role"], "content": r["content"], "reasoning": r["reasoning"], "images": images.get(r["id"], [])}
+        {"role": r["role"], "content": r["content"], "reasoning": r["reasoning"],
+         "images": images.get(r["id"], []), "usage": usage_json(r)}
         for r in rows
     ]
     return jsonify({"id": conv["id"], "title": conv["title"], "messages": messages})
@@ -479,6 +520,76 @@ def ndjson(obj):
     return json.dumps(obj, ensure_ascii=False) + "\n"
 
 
+def is_peak_hour(now=None):
+    """北京时间工作日 9-12 点、14-18 点是高峰时段（法定节假日无法判断，按工作日算，所以是"约"）"""
+    now = now or datetime.now(BEIJING)
+    return now.weekday() < 5 and (9 <= now.hour < 12 or 14 <= now.hour < 18)
+
+
+def read_usage(usage):
+    """把 DeepSeek 返回的 usage 转成我们存的 3 个数"""
+    if usage is None:
+        return None
+    prompt = getattr(usage, "prompt_tokens", 0) or 0
+    hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    if hit is None:
+        details = getattr(usage, "prompt_tokens_details", None)
+        hit = getattr(details, "cached_tokens", 0) if details else 0
+    return {"prompt_tokens": prompt, "cache_hit_tokens": hit or 0,
+            "completion_tokens": getattr(usage, "completion_tokens", 0) or 0}
+
+
+def estimate_cost(tokens, model, now=None):
+    price_hit, price_miss, price_out = MODELS.get(model, MODELS[DEFAULT_MODEL])["price"]
+    factor = 2 if is_peak_hour(now) else 1
+    miss = max(tokens["prompt_tokens"] - tokens["cache_hit_tokens"], 0)
+    return round(factor * (
+        tokens["cache_hit_tokens"] * price_hit
+        + miss * price_miss
+        + tokens["completion_tokens"] * price_out
+    ) / 1_000_000, 6)
+
+
+def model_label(model):
+    return MODELS[model]["label"] if model in MODELS else model
+
+
+def usage_json(row):
+    if row.get("prompt_tokens") is None:
+        return None
+    return {
+        "prompt_tokens": row["prompt_tokens"],
+        "cache_hit_tokens": row["cache_hit_tokens"] or 0,
+        "completion_tokens": row["completion_tokens"] or 0,
+        "cost": float(row["cost"]) if row.get("cost") is not None else None,
+        "with_context": bool(row.get("with_context")),
+        "model": row.get("model"),
+        "model_label": model_label(row["model"]) if row.get("model") else None,
+    }
+
+
+def load_context(cur, conv_id, before_message_id):
+    """连续对话：取这条消息之前的最近几轮，只带文字（历史图片不再发送，避免重复计费）"""
+    cur.execute(
+        "SELECT m.id, m.role, m.content, COUNT(mi.id) AS image_count FROM messages m "
+        "LEFT JOIN message_images mi ON mi.message_id = m.id "
+        "WHERE m.conversation_id = %s AND m.id < %s GROUP BY m.id ORDER BY m.id DESC LIMIT %s",
+        (conv_id, before_message_id, CONTEXT_ROUNDS * 2)
+    )
+    rows = list(reversed(cur.fetchall()))
+    # 从用户消息开始，避免第一条是孤立的 AI 回复
+    while rows and rows[0]["role"] != "user":
+        rows.pop(0)
+    history = []
+    for r in rows:
+        text = r["content"]
+        if r["image_count"]:
+            text = f"[发送了 {r['image_count']} 张图片] {text}".strip()
+        if text:
+            history.append({"role": r["role"], "content": text})
+    return history
+
+
 @app.route('/chat', methods=['POST'])
 @login_required
 def chat():
@@ -489,11 +600,19 @@ def chat():
     data = request.get_json(silent=True) or {}
     conv_id = data.get('conversation_id')
     regenerate = bool(data.get('regenerate'))
+    with_context = bool(data.get('context'))
+    model = data.get('model') if data.get('model') in MODELS else DEFAULT_MODEL
+    no_vision_error = {
+        "error": f"{MODELS[model]['label']} 模型不支持图片，请切换到支持识图的模型（如 Flash）",
+        "code": "model_no_vision",
+    }
     user_message = str(data.get('message') or '').strip()
     try:
         images = [] if regenerate else parse_images(data.get('images'))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    if images and not MODELS[model]["vision"]:
+        return jsonify(no_vision_error), 400
 
     saved_files = []
     try:
@@ -505,25 +624,27 @@ def chat():
                 return jsonify({"error": "缺少对话 ID"}), 400
 
             if regenerate:
-                # 重新生成：删掉最后一条 AI 回复，用最后一条用户消息（连同图片）重新提问
+                # 重新生成：用最后一条用户消息（连同图片）重新提问，并删掉它后面的旧回复
                 cur.execute(
-                    "SELECT id, role, content FROM messages WHERE conversation_id = %s ORDER BY id DESC LIMIT 1",
+                    "SELECT id, role FROM messages WHERE conversation_id = %s ORDER BY id DESC LIMIT 1",
                     (conv_id,)
                 )
                 last = cur.fetchone()
-                if last is None:
+                cur.execute(
+                    "SELECT id, content FROM messages WHERE conversation_id = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
+                    (conv_id,)
+                )
+                question = cur.fetchone()
+                if last is None or question is None:
                     return jsonify({"error": "没有可以重新生成的消息"}), 400
+                images = load_message_images(cur, question["id"])
+                # 先检查再删旧回复，换了不支持图片的模型时旧回复还在
+                if images and not MODELS[model]["vision"]:
+                    return jsonify(no_vision_error), 400
                 if last["role"] == "assistant":
                     cur.execute("DELETE FROM messages WHERE id = %s", (last["id"],))
-                    cur.execute(
-                        "SELECT id, content FROM messages WHERE conversation_id = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
-                        (conv_id,)
-                    )
-                    last = cur.fetchone()
-                    if last is None:
-                        return jsonify({"error": "没有可以重新生成的消息"}), 400
-                user_message = last["content"]
-                images = load_message_images(cur, last["id"])
+                user_message = question["content"]
+                user_message_id = question["id"]
             else:
                 if not user_message and not images:
                     return jsonify({"error": "消息不能为空"}), 400
@@ -535,8 +656,11 @@ def chat():
                     "INSERT INTO messages (conversation_id, role, content) VALUES (%s, 'user', %s)",
                     (conv_id, user_message)
                 )
-                saved_files = save_message_images(cur, cur.lastrowid, user_id, images)
+                user_message_id = cur.lastrowid
+                saved_files = save_message_images(cur, user_message_id, user_id, images)
             cur.execute("UPDATE conversations SET updated_at = NOW() WHERE id = %s", (conv_id,))
+            # 默认不带上下文（省 token）；用户打开"连续对话"才带上最近几轮
+            history = load_context(cur, conv_id, user_message_id) if with_context else []
     except Exception:
         # 数据库已回滚，把写到一半的图片文件也删掉
         delete_image_files(saved_files)
@@ -551,18 +675,20 @@ def chat():
 
     def generate():
         content, reasoning = [], []
+        tokens = None
         yield ndjson({"conversation_id": conv_id, "title": user_message[:30] or "[图片]"})
         try:
-            # 只发送当前这一条消息，不带历史上下文，节省 token
             stream = make_client(api_key).chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content}
-                ],
-                stream=True
+                model=model,
+                messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history
+                         + [{"role": "user", "content": user_content}],
+                stream=True,
+                # 最后一个数据块会带上本次的 token 用量
+                stream_options={"include_usage": True}
             )
             for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    tokens = read_usage(chunk.usage)
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -574,15 +700,24 @@ def chat():
                 if delta.content:
                     content.append(delta.content)
                     yield ndjson({"delta": delta.content})
+            if tokens:
+                tokens["cost"] = estimate_cost(tokens, model)
+                yield ndjson({"usage": dict(tokens, with_context=with_context,
+                                            model=model, model_label=model_label(model))})
         except Exception as e:
             yield ndjson({"error": str(e)})
         finally:
-            # 用户中途停止时也会走到这里，保存已经生成的部分
+            # 用户中途停止时也会走到这里，保存已经生成的部分（中途停止拿不到用量，就不记）
             if content:
                 with db() as cur:
                     cur.execute(
-                        "INSERT INTO messages (conversation_id, role, content, reasoning) VALUES (%s, 'assistant', %s, %s)",
-                        (conv_id, "".join(content), "".join(reasoning) or None)
+                        "INSERT INTO messages (conversation_id, role, content, reasoning, prompt_tokens, "
+                        "cache_hit_tokens, completion_tokens, cost, with_context, model) "
+                        "VALUES (%s, 'assistant', %s, %s, %s, %s, %s, %s, %s, %s)",
+                        (conv_id, "".join(content), "".join(reasoning) or None,
+                         tokens and tokens["prompt_tokens"], tokens and tokens["cache_hit_tokens"],
+                         tokens and tokens["completion_tokens"], tokens and tokens.get("cost"),
+                         with_context, model)
                     )
 
     return Response(
